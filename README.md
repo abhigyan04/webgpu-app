@@ -1,6 +1,6 @@
 # WebGPU Life
 
-A minimal WebGPU demo that renders a grid of cells onto a canvas using GPU instancing and bind groups.
+A minimal WebGPU demo that renders a grid of cells onto a canvas to show a version of Conway's Game of Life simulation using GPU instancing and bind groups.
 
 ## Files
 
