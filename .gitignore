@@ -1,0 +1,17 @@
+# Node modules (if any node-based tooling is added later)
+node_modules/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor files
+.vscode/
+
+# Temporary files
+*.tmp
+*.log
+
+# Build artifacts
+dist/
+build/
