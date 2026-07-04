@@ -1,0 +1,796 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Stable Fluids — WebGPU Compute</title>
+<style>
+  :root {
+    --ink: #e8e6e0;
+    --ink-dim: #8a887f;
+    --panel: rgba(10, 10, 12, 0.82);
+    --line: rgba(232, 230, 224, 0.14);
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; overflow: hidden; background: #060608; }
+  body {
+    font-family: ui-monospace, "SF Mono", "Cascadia Code", "JetBrains Mono", Menlo, Consolas, monospace;
+    color: var(--ink);
+    font-size: 11px;
+    -webkit-font-smoothing: antialiased;
+  }
+  canvas#gfx {
+    position: fixed; inset: 0;
+    width: 100%; height: 100%;
+    touch-action: none;
+    cursor: crosshair;
+    display: block;
+  }
+  /* ---------- HUD ---------- */
+  .hud {
+    position: fixed; top: 14px; left: 14px;
+    width: 232px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    user-select: none;
+  }
+  .hud summary {
+    list-style: none; cursor: pointer;
+    padding: 10px 12px;
+    display: flex; justify-content: space-between; align-items: baseline;
+    border-bottom: 1px solid var(--line);
+  }
+  .hud summary::-webkit-details-marker { display: none; }
+  .hud[open] summary .caret::before { content: "–"; }
+  .hud summary .caret::before { content: "+"; color: var(--ink-dim); }
+  .hud h1 {
+    font-size: 11px; font-weight: 600;
+    letter-spacing: 0.14em;
+  }
+  .hud h1 span { color: var(--ink-dim); font-weight: 400; }
+  .hud .body { padding: 10px 12px 12px; }
+  .stat-row {
+    display: flex; justify-content: space-between;
+    padding: 2px 0;
+    color: var(--ink-dim);
+  }
+  .stat-row b { color: var(--ink); font-weight: 500; font-variant-numeric: tabular-nums; }
+  .sect {
+    margin-top: 10px; padding-top: 8px;
+    border-top: 1px solid var(--line);
+    color: var(--ink-dim);
+    letter-spacing: 0.12em;
+    font-size: 9px;
+  }
+  /* pass pipeline readout */
+  .pass {
+    display: flex; justify-content: space-between;
+    padding: 1.5px 0;
+    color: var(--ink-dim);
+    font-variant-numeric: tabular-nums;
+  }
+  .pass i { font-style: normal; color: var(--ink); }
+  .pass.active i { color: var(--ink); }
+  /* sliders */
+  .ctl { margin-top: 7px; }
+  .ctl label {
+    display: flex; justify-content: space-between;
+    color: var(--ink-dim); margin-bottom: 3px;
+  }
+  .ctl label output { color: var(--ink); font-variant-numeric: tabular-nums; }
+  input[type="range"] {
+    width: 100%; height: 14px;
+    appearance: none; -webkit-appearance: none;
+    background: transparent; cursor: ew-resize;
+  }
+  input[type="range"]::-webkit-slider-runnable-track {
+    height: 2px; background: var(--line);
+  }
+  input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 8px; height: 12px; margin-top: -5px;
+    background: var(--ink);
+  }
+  input[type="range"]::-moz-range-track { height: 2px; background: var(--line); }
+  input[type="range"]::-moz-range-thumb {
+    width: 8px; height: 12px; border: none; border-radius: 0;
+    background: var(--ink);
+  }
+  input[type="range"]:focus-visible { outline: 1px solid var(--ink); outline-offset: 2px; }
+  /* buttons */
+  .btns { display: flex; gap: 6px; margin-top: 12px; }
+  button {
+    flex: 1;
+    font: inherit; letter-spacing: 0.1em;
+    color: var(--ink); background: transparent;
+    border: 1px solid var(--line);
+    padding: 6px 0; cursor: pointer;
+  }
+  button:hover { border-color: var(--ink-dim); }
+  button:focus-visible { outline: 1px solid var(--ink); outline-offset: 2px; }
+  .hint {
+    position: fixed; bottom: 14px; left: 14px;
+    color: var(--ink-dim); letter-spacing: 0.08em;
+    pointer-events: none;
+    transition: opacity 1.2s ease;
+  }
+  /* fallback overlay */
+  .nogpu {
+    position: fixed; inset: 0;
+    display: none; align-items: center; justify-content: center;
+    text-align: center; line-height: 1.7; padding: 24px;
+    background: #060608; z-index: 10;
+  }
+  .nogpu p { max-width: 42ch; color: var(--ink-dim); }
+  .nogpu b { color: var(--ink); display: block; margin-bottom: 8px; font-size: 13px; letter-spacing: 0.1em; }
+  @media (max-width: 560px) { .hud { width: 200px; } }
+</style>
+</head>
+<body>
+
+<canvas id="gfx"></canvas>
+
+<details class="hud" id="hud" open>
+  <summary>
+    <h1>STABLE FLUIDS <span>/ webgpu</span></h1>
+    <span class="caret"></span>
+  </summary>
+  <div class="body">
+    <div class="stat-row"><span>frame</span><b><span id="fps">--</span> fps · <span id="ms">--</span> ms</b></div>
+    <div class="stat-row"><span>sim / dye grid</span><b id="grids">--</b></div>
+
+    <div class="sect">PASS PIPELINE · <span id="dispatches">0</span> DISPATCHES/FRAME</div>
+    <div class="pass"><span>curl</span><i>×1</i></div>
+    <div class="pass"><span>vorticity confinement</span><i>×1</i></div>
+    <div class="pass"><span>advect velocity</span><i>×1</i></div>
+    <div class="pass"><span>splat vel + dye</span><i id="splatCount">×0</i></div>
+    <div class="pass"><span>divergence</span><i>×1</i></div>
+    <div class="pass"><span>jacobi pressure</span><i id="jacobiCount">×40</i></div>
+    <div class="pass"><span>subtract ∇p</span><i>×1</i></div>
+    <div class="pass"><span>advect dye</span><i>×1</i></div>
+
+    <div class="sect">PARAMETERS</div>
+    <div class="ctl">
+      <label>vorticity <output id="vortOut">30</output></label>
+      <input type="range" id="vort" min="0" max="60" step="1" value="30">
+    </div>
+    <div class="ctl">
+      <label>pressure iterations <output id="jacOut">40</output></label>
+      <input type="range" id="jac" min="10" max="80" step="2" value="40">
+    </div>
+    <div class="ctl">
+      <label>dye fade <output id="fadeOut">1.2</output></label>
+      <input type="range" id="fade" min="0" max="4" step="0.1" value="1.2">
+    </div>
+    <div class="ctl">
+      <label>splat size <output id="sizeOut">1.0</output></label>
+      <input type="range" id="size" min="0.3" max="3" step="0.1" value="1">
+    </div>
+
+    <div class="btns">
+      <button id="pauseBtn">PAUSE</button>
+      <button id="clearBtn">CLEAR</button>
+    </div>
+  </div>
+</details>
+
+<div class="hint" id="hint">drag to inject dye + velocity</div>
+
+<div class="nogpu" id="nogpu">
+  <p><b>WEBGPU NOT AVAILABLE</b>
+  This demo needs a browser with WebGPU support —
+  Chrome or Edge 113+, or Safari 18+ on macOS/iOS.
+  Firefox: enable dom.webgpu.enabled in about:config.</p>
+</div>
+
+<script type="module">
+/* ============================================================
+   STABLE FLUIDS on WebGPU compute
+   Jos Stam, "Stable Fluids" (SIGGRAPH '99), semi-Lagrangian
+   advection + Jacobi pressure projection, with vorticity
+   confinement (Fedkiw et al.) to keep small-scale swirl alive.
+
+   Frame graph (all compute passes, ping-pong textures):
+     curl -> vorticity -> advect(vel) -> [splat] -> divergence
+          -> jacobi xN -> subtract gradient -> advect(dye) -> draw
+   ============================================================ */
+
+// ---------- tunables ----------
+const SIM_H  = 288;    // velocity / pressure grid height (width follows aspect)
+const DYE_H  = 1024;   // dye grid height — higher res than velocity, standard trick
+const VEL_DISSIPATION = 0.15;  // 1/s
+const SPLAT_FORCE = 0.45;      // pointer delta -> velocity scale
+const BASE_RADIUS = 0.0025;    // splat gaussian radius (uv^2 units)
+
+// ---------- state ----------
+const canvas = document.getElementById('gfx');
+let device, context, format;
+let simW, simH, dyeW, dyeH;
+let velocity, dye, pressure;      // ping-pong pairs
+let curlTex, divTex;              // single (views)
+let singleTexs = [];              // their GPUTexture handles, for cleanup
+let params, paramData;
+let pipelines = {}, sampler;
+const bgCache = new Map();
+let paused = false;
+let jacobiIters = 40;
+let pendingSplats = [];           // seeded + pointer splats, one applied per frame
+let hue = Math.random();
+
+// ---------- boilerplate ----------
+async function init() {
+  if (!navigator.gpu) return fail();
+  const adapter = await navigator.gpu.requestAdapter();
+  if (!adapter) return fail();
+  device = await adapter.requestDevice();
+  device.lost.then(fail);
+
+  format = navigator.gpu.getPreferredCanvasFormat();
+  context = canvas.getContext('webgpu');
+  resizeCanvas();
+  context.configure({ device, format, alphaMode: 'opaque' });
+
+  // grid sizes fixed at load; aspect uniform keeps splats round on resize
+  const aspect = canvas.width / canvas.height;
+  simH = SIM_H; simW = Math.round(SIM_H * aspect);
+  dyeH = DYE_H; dyeW = Math.round(DYE_H * aspect);
+  document.getElementById('grids').textContent = `${simW}×${simH} / ${dyeW}×${dyeH}`;
+
+  sampler = device.createSampler({
+    magFilter: 'linear', minFilter: 'linear',
+    addressModeU: 'clamp-to-edge', addressModeV: 'clamp-to-edge',
+  });
+
+  createTextures();
+  createParams();
+  createPipelines();
+  seedSplats(14);
+
+  window.addEventListener('resize', () => { resizeCanvas(); });
+  bindPointer();
+  bindUI();
+  requestAnimationFrame(frame);
+}
+
+function fail() {
+  document.getElementById('nogpu').style.display = 'flex';
+}
+
+function resizeCanvas() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  canvas.width  = Math.floor(canvas.clientWidth  * dpr);
+  canvas.height = Math.floor(canvas.clientHeight * dpr);
+}
+
+// ---------- resources ----------
+function makeTex(w, h, fmt) {
+  return device.createTexture({
+    size: [w, h],
+    format: fmt,
+    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING,
+  });
+}
+
+// ping-pong pair: read from .r(), write to .w(), then .swap()
+function pingPong(w, h, fmt) {
+  const t = [makeTex(w, h, fmt), makeTex(w, h, fmt)];
+  const v = [t[0].createView(), t[1].createView()];
+  return { t, v, i: 0,
+    r() { return this.v[this.i]; },
+    w() { return this.v[1 - this.i]; },
+    swap() { this.i = 1 - this.i; },
+  };
+}
+
+function createTextures() {
+  velocity = pingPong(simW, simH, 'rgba16float'); // .xy = velocity (sim-texels/sec)
+  dye      = pingPong(dyeW, dyeH, 'rgba16float');
+  pressure = pingPong(simW, simH, 'r32float');    // warm-started across frames
+  const curlT = makeTex(simW, simH, 'r32float');
+  const divT  = makeTex(simW, simH, 'r32float');
+  curlTex = curlT.createView();
+  divTex  = divT.createView();
+  singleTexs = [curlT, divT];
+  bgCache.clear();
+}
+
+function createParams() {
+  paramData = new Float32Array(24);
+  params = device.createBuffer({
+    size: paramData.byteLength,
+    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+  });
+}
+
+// ---------- WGSL ----------
+const COMMON = /* wgsl */`
+struct Params {
+  simTexel   : vec2f,
+  simSize    : vec2f,
+  dyeTexel   : vec2f,
+  dyeSize    : vec2f,
+  dt         : f32,
+  velDiss    : f32,
+  dyeDiss    : f32,
+  vorticity  : f32,
+  splatPos   : vec2f,
+  splatVel   : vec2f,
+  splatColor : vec4f,
+  splatRadius: f32,
+  splatActive: f32,
+  aspect     : f32,
+  time       : f32,
+};
+@group(0) @binding(0) var<uniform> P : Params;
+
+fn cl(c: vec2i, size: vec2f) -> vec2i {
+  return clamp(c, vec2i(0), vec2i(size) - 1);
+}
+`;
+
+// -- semi-Lagrangian advection: backtrace along velocity, bilinear sample --
+const ADVECT = COMMON + /* wgsl */`
+@group(0) @binding(1) var samp : sampler;
+@group(0) @binding(2) var velTex : texture_2d<f32>;
+@group(0) @binding(3) var srcTex : texture_2d<f32>;
+@group(0) @binding(4) var dst : texture_storage_2d<rgba16float, write>;
+
+fn advect(id: vec2u, size: vec2f, texel: vec2f, diss: f32) {
+  if (f32(id.x) >= size.x || f32(id.y) >= size.y) { return; }
+  let uv = (vec2f(id) + 0.5) * texel;
+  let vel = textureSampleLevel(velTex, samp, uv, 0.0).xy;
+  let coord = uv - P.dt * vel * P.simTexel;          // velocity lives on sim grid
+  let result = textureSampleLevel(srcTex, samp, coord, 0.0);
+  let decay = 1.0 / (1.0 + diss * P.dt);
+  textureStore(dst, vec2i(id), result * decay);
+}
+
+@compute @workgroup_size(8, 8)
+fn advectVel(@builtin(global_invocation_id) gid: vec3u) {
+  advect(gid.xy, P.simSize, P.simTexel, P.velDiss);
+}
+
+@compute @workgroup_size(8, 8)
+fn advectDye(@builtin(global_invocation_id) gid: vec3u) {
+  advect(gid.xy, P.dyeSize, P.dyeTexel, P.dyeDiss);
+}
+`;
+
+// -- gaussian splat: pointer injects momentum into vel, color into dye --
+const SPLAT = COMMON + /* wgsl */`
+@group(0) @binding(1) var srcTex : texture_2d<f32>;
+@group(0) @binding(2) var dst : texture_storage_2d<rgba16float, write>;
+
+fn gauss(uv: vec2f) -> f32 {
+  var d = uv - P.splatPos;
+  d.x = d.x * P.aspect;
+  return exp(-dot(d, d) / P.splatRadius) * P.splatActive;
+}
+
+@compute @workgroup_size(8, 8)
+fn splatVel(@builtin(global_invocation_id) gid: vec3u) {
+  if (f32(gid.x) >= P.simSize.x || f32(gid.y) >= P.simSize.y) { return; }
+  let uv = (vec2f(gid.xy) + 0.5) * P.simTexel;
+  let base = textureLoad(srcTex, vec2i(gid.xy), 0).xy;
+  textureStore(dst, vec2i(gid.xy), vec4f(base + P.splatVel * gauss(uv), 0.0, 1.0));
+}
+
+@compute @workgroup_size(8, 8)
+fn splatDye(@builtin(global_invocation_id) gid: vec3u) {
+  if (f32(gid.x) >= P.dyeSize.x || f32(gid.y) >= P.dyeSize.y) { return; }
+  let uv = (vec2f(gid.xy) + 0.5) * P.dyeTexel;
+  let base = textureLoad(srcTex, vec2i(gid.xy), 0).rgb;
+  textureStore(dst, vec2i(gid.xy), vec4f(base + P.splatColor.rgb * gauss(uv), 1.0));
+}
+`;
+
+// -- curl of velocity field (scalar in 2D) --
+const CURL = COMMON + /* wgsl */`
+@group(0) @binding(1) var velTex : texture_2d<f32>;
+@group(0) @binding(2) var dst : texture_storage_2d<r32float, write>;
+
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) gid: vec3u) {
+  if (f32(gid.x) >= P.simSize.x || f32(gid.y) >= P.simSize.y) { return; }
+  let c = vec2i(gid.xy);
+  let L = textureLoad(velTex, cl(c + vec2i(-1, 0), P.simSize), 0).y;
+  let R = textureLoad(velTex, cl(c + vec2i( 1, 0), P.simSize), 0).y;
+  let B = textureLoad(velTex, cl(c + vec2i( 0,-1), P.simSize), 0).x;
+  let T = textureLoad(velTex, cl(c + vec2i( 0, 1), P.simSize), 0).x;
+  textureStore(dst, c, vec4f(0.5 * ((R - L) - (T - B)), 0.0, 0.0, 0.0));
+}
+`;
+
+// -- vorticity confinement: push velocity toward local curl maxima --
+const VORTICITY = COMMON + /* wgsl */`
+@group(0) @binding(1) var velTex : texture_2d<f32>;
+@group(0) @binding(2) var curlTex : texture_2d<f32>;
+@group(0) @binding(3) var dst : texture_storage_2d<rgba16float, write>;
+
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) gid: vec3u) {
+  if (f32(gid.x) >= P.simSize.x || f32(gid.y) >= P.simSize.y) { return; }
+  let c = vec2i(gid.xy);
+  let L = textureLoad(curlTex, cl(c + vec2i(-1, 0), P.simSize), 0).x;
+  let R = textureLoad(curlTex, cl(c + vec2i( 1, 0), P.simSize), 0).x;
+  let B = textureLoad(curlTex, cl(c + vec2i( 0,-1), P.simSize), 0).x;
+  let T = textureLoad(curlTex, cl(c + vec2i( 0, 1), P.simSize), 0).x;
+  let C = textureLoad(curlTex, c, 0).x;
+
+  var force = 0.5 * vec2f(abs(T) - abs(B), abs(R) - abs(L));
+  force = force / (length(force) + 1e-4);
+  force = force * (P.vorticity * C);
+  force.y = -force.y;
+
+  var vel = textureLoad(velTex, c, 0).xy + force * P.dt;
+  vel = clamp(vel, vec2f(-1000.0), vec2f(1000.0));
+  textureStore(dst, c, vec4f(vel, 0.0, 1.0));
+}
+`;
+
+// -- divergence of velocity (RHS of the pressure Poisson equation) --
+const DIVERGENCE = COMMON + /* wgsl */`
+@group(0) @binding(1) var velTex : texture_2d<f32>;
+@group(0) @binding(2) var dst : texture_storage_2d<r32float, write>;
+
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) gid: vec3u) {
+  if (f32(gid.x) >= P.simSize.x || f32(gid.y) >= P.simSize.y) { return; }
+  let c = vec2i(gid.xy);
+  let L = textureLoad(velTex, cl(c + vec2i(-1, 0), P.simSize), 0).x;
+  let R = textureLoad(velTex, cl(c + vec2i( 1, 0), P.simSize), 0).x;
+  let B = textureLoad(velTex, cl(c + vec2i( 0,-1), P.simSize), 0).y;
+  let T = textureLoad(velTex, cl(c + vec2i( 0, 1), P.simSize), 0).y;
+  textureStore(dst, c, vec4f(0.5 * (R - L + T - B), 0.0, 0.0, 0.0));
+}
+`;
+
+// -- Jacobi relaxation on the pressure Poisson equation --
+const JACOBI = COMMON + /* wgsl */`
+@group(0) @binding(1) var pressureTex : texture_2d<f32>;
+@group(0) @binding(2) var divTex : texture_2d<f32>;
+@group(0) @binding(3) var dst : texture_storage_2d<r32float, write>;
+
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) gid: vec3u) {
+  if (f32(gid.x) >= P.simSize.x || f32(gid.y) >= P.simSize.y) { return; }
+  let c = vec2i(gid.xy);
+  let L = textureLoad(pressureTex, cl(c + vec2i(-1, 0), P.simSize), 0).x;
+  let R = textureLoad(pressureTex, cl(c + vec2i( 1, 0), P.simSize), 0).x;
+  let B = textureLoad(pressureTex, cl(c + vec2i( 0,-1), P.simSize), 0).x;
+  let T = textureLoad(pressureTex, cl(c + vec2i( 0, 1), P.simSize), 0).x;
+  let div = textureLoad(divTex, c, 0).x;
+  textureStore(dst, c, vec4f((L + R + B + T - div) * 0.25, 0.0, 0.0, 0.0));
+}
+`;
+
+// -- subtract pressure gradient: velocity becomes divergence-free --
+const GRADIENT = COMMON + /* wgsl */`
+@group(0) @binding(1) var pressureTex : texture_2d<f32>;
+@group(0) @binding(2) var velTex : texture_2d<f32>;
+@group(0) @binding(3) var dst : texture_storage_2d<rgba16float, write>;
+
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) gid: vec3u) {
+  if (f32(gid.x) >= P.simSize.x || f32(gid.y) >= P.simSize.y) { return; }
+  let c = vec2i(gid.xy);
+  let L = textureLoad(pressureTex, cl(c + vec2i(-1, 0), P.simSize), 0).x;
+  let R = textureLoad(pressureTex, cl(c + vec2i( 1, 0), P.simSize), 0).x;
+  let B = textureLoad(pressureTex, cl(c + vec2i( 0,-1), P.simSize), 0).x;
+  let T = textureLoad(pressureTex, cl(c + vec2i( 0, 1), P.simSize), 0).x;
+  let vel = textureLoad(velTex, c, 0).xy - 0.5 * vec2f(R - L, T - B);
+  textureStore(dst, c, vec4f(vel, 0.0, 1.0));
+}
+`;
+
+// -- fullscreen triangle + soft filmic tonemap on the HDR dye --
+const RENDER = COMMON + /* wgsl */`
+@group(0) @binding(1) var samp : sampler;
+@group(0) @binding(2) var dyeTex : texture_2d<f32>;
+
+struct VSOut {
+  @builtin(position) pos : vec4f,
+  @location(0) uv : vec2f,
+};
+
+@vertex
+fn vs(@builtin(vertex_index) vi: u32) -> VSOut {
+  var out: VSOut;
+  let uv = vec2f(f32((vi << 1u) & 2u), f32(vi & 2u));
+  out.pos = vec4f(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, 0.0, 1.0);
+  out.uv = uv;
+  return out;
+}
+
+@fragment
+fn fs(in: VSOut) -> @location(0) vec4f {
+  var c = textureSampleLevel(dyeTex, samp, in.uv, 0.0).rgb;
+  c = vec3f(1.0) - exp(-c * 1.4);        // soft HDR rolloff
+  c = pow(c, vec3f(1.0 / 1.1));          // slight lift
+  return vec4f(c, 1.0);
+}
+`;
+
+function createPipelines() {
+  const cp = (code, entryPoint) => device.createComputePipeline({
+    layout: 'auto',
+    compute: { module: device.createShaderModule({ code }), entryPoint },
+  });
+  pipelines.advectVel  = cp(ADVECT, 'advectVel');
+  pipelines.advectDye  = cp(ADVECT, 'advectDye');
+  pipelines.splatVel   = cp(SPLAT, 'splatVel');
+  pipelines.splatDye   = cp(SPLAT, 'splatDye');
+  pipelines.curl       = cp(CURL, 'main');
+  pipelines.vorticity  = cp(VORTICITY, 'main');
+  pipelines.divergence = cp(DIVERGENCE, 'main');
+  pipelines.jacobi     = cp(JACOBI, 'main');
+  pipelines.gradient   = cp(GRADIENT, 'main');
+
+  const renderModule = device.createShaderModule({ code: RENDER });
+  pipelines.render = device.createRenderPipeline({
+    layout: 'auto',
+    vertex:   { module: renderModule, entryPoint: 'vs' },
+    fragment: { module: renderModule, entryPoint: 'fs', targets: [{ format }] },
+    primitive: { topology: 'triangle-list' },
+  });
+}
+
+// bind groups are cached per (pipeline, ping-pong state) — cheap swaps, no per-frame churn
+function bindGroup(key, pipeline, resources) {
+  let bgr = bgCache.get(key);
+  if (!bgr) {
+    const entries = resources.map((resource, i) => {
+      if (resource && typeof resource === 'object' && 'binding' in resource) {
+        return { binding: resource.binding, resource: resource.resource };
+      }
+      return { binding: i, resource };
+    });
+    bgr = device.createBindGroup({
+      layout: pipeline.getBindGroupLayout(0),
+      entries,
+    });
+    bgCache.set(key, bgr);
+  }
+  return bgr;
+}
+
+// ---------- dispatch helpers ----------
+const wg = (n) => Math.ceil(n / 8);
+let dispatchCount = 0;
+
+function computePass(enc, pipeline, bgr, w, h) {
+  const pass = enc.beginComputePass();
+  pass.setPipeline(pipeline);
+  pass.setBindGroup(0, bgr);
+  pass.dispatchWorkgroups(wg(w), wg(h));
+  pass.end();
+  dispatchCount++;
+}
+
+// ---------- simulation step ----------
+function step(enc, splat) {
+  const u = { buffer: params };
+
+  // 1. curl(vel) -> curlTex
+  computePass(enc, pipelines.curl,
+    bindGroup(`curl${velocity.i}`, pipelines.curl, [u, velocity.r(), curlTex]),
+    simW, simH);
+
+  // 2. vorticity confinement: vel + curl -> vel'
+  computePass(enc, pipelines.vorticity,
+    bindGroup(`vort${velocity.i}`, pipelines.vorticity, [u, velocity.r(), curlTex, velocity.w()]),
+    simW, simH);
+  velocity.swap();
+
+  // 3. self-advect velocity
+  computePass(enc, pipelines.advectVel,
+    bindGroup(`advV${velocity.i}`, pipelines.advectVel, [u, sampler, velocity.r(), velocity.r(), velocity.w()]),
+    simW, simH);
+  velocity.swap();
+
+  // 4. splat momentum + dye (skipped when no input this frame)
+  if (splat) {
+    computePass(enc, pipelines.splatVel,
+      bindGroup(`spV${velocity.i}`, pipelines.splatVel, [u, velocity.r(), velocity.w()]),
+      simW, simH);
+    velocity.swap();
+    computePass(enc, pipelines.splatDye,
+      bindGroup(`spD${dye.i}`, pipelines.splatDye, [u, dye.r(), dye.w()]),
+      dyeW, dyeH);
+    dye.swap();
+  }
+
+  // 5. divergence(vel) -> divTex
+  computePass(enc, pipelines.divergence,
+    bindGroup(`div${velocity.i}`, pipelines.divergence, [u, velocity.r(), divTex]),
+    simW, simH);
+
+  // 6. Jacobi iterations (pressure warm-started from last frame's solution)
+  for (let i = 0; i < jacobiIters; i++) {
+    computePass(enc, pipelines.jacobi,
+      bindGroup(`jac${pressure.i}`, pipelines.jacobi, [u, pressure.r(), divTex, pressure.w()]),
+      simW, simH);
+    pressure.swap();
+  }
+
+  // 7. vel -= grad(pressure)  =>  divergence-free field
+  computePass(enc, pipelines.gradient,
+    bindGroup(`grad${pressure.i}_${velocity.i}`, pipelines.gradient, [u, pressure.r(), velocity.r(), velocity.w()]),
+    simW, simH);
+  velocity.swap();
+
+  // 8. advect dye through the projected velocity field
+  computePass(enc, pipelines.advectDye,
+    bindGroup(`advD${velocity.i}_${dye.i}`, pipelines.advectDye, [u, sampler, velocity.r(), dye.r(), dye.w()]),
+    dyeW, dyeH);
+  dye.swap();
+}
+
+// ---------- input ----------
+const pointer = { down: false, x: 0.5, y: 0.5, dx: 0, dy: 0, moved: false };
+
+function bindPointer() {
+  const uv = (e) => [e.clientX / canvas.clientWidth, e.clientY / canvas.clientHeight];
+
+  canvas.addEventListener('pointerdown', (e) => {
+    canvas.setPointerCapture(e.pointerId);
+    [pointer.x, pointer.y] = uv(e);
+    pointer.down = true;
+    pointer.moved = true;          // tap with no drag still puffs dye
+    pointer.dx = 0; pointer.dy = 0;
+    hue = Math.random();
+    document.getElementById('hint').style.opacity = '0';
+  });
+  canvas.addEventListener('pointermove', (e) => {
+    if (!pointer.down) return;
+    const [x, y] = uv(e);
+    pointer.dx += x - pointer.x;   // accumulate; coalesced into one splat per frame
+    pointer.dy += y - pointer.y;
+    pointer.x = x; pointer.y = y;
+    pointer.moved = true;
+  });
+  const up = () => { pointer.down = false; };
+  canvas.addEventListener('pointerup', up);
+  canvas.addEventListener('pointercancel', up);
+}
+
+function hsv(h, s, v) {
+  const f = (n) => {
+    const k = (n + h * 6) % 6;
+    return v - v * s * Math.max(Math.min(k, 4 - k, 1), 0);
+  };
+  return [f(5), f(3), f(1)];
+}
+
+function seedSplats(n) {
+  const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * Math.PI * 2;
+    const speed = reduced ? 60 : 260 + Math.random() * 340;
+    pendingSplats.push({
+      x: 0.2 + Math.random() * 0.6,
+      y: 0.2 + Math.random() * 0.6,
+      vx: Math.cos(a) * speed,
+      vy: Math.sin(a) * speed,
+      color: hsv(Math.random(), 0.85, 0.9).map(c => c * 0.5),
+      radius: BASE_RADIUS * (1 + Math.random() * 3),
+    });
+  }
+}
+
+// ---------- frame loop ----------
+let lastT = performance.now();
+let fpsEMA = 60, msEMA = 16.6, time = 0;
+const ui = {};
+
+function frame(now) {
+  const rawDt = (now - lastT) / 1000;
+  lastT = now;
+  const dt = Math.min(rawDt, 1 / 30);   // clamp so tab-switch doesn't explode the sim
+  time += dt;
+
+  // FPS readout (EMA-smoothed)
+  fpsEMA += (1 / Math.max(rawDt, 1e-4) - fpsEMA) * 0.05;
+  msEMA  += (rawDt * 1000 - msEMA) * 0.05;
+  ui.fps.textContent = fpsEMA.toFixed(0);
+  ui.ms.textContent  = msEMA.toFixed(1);
+
+  // pick this frame's splat: seeded queue first, then live pointer input
+  let splat = pendingSplats.shift() || null;
+  if (!splat && pointer.moved) {
+    const speed = Math.hypot(pointer.dx, pointer.dy) / Math.max(dt, 1e-4);
+    splat = {
+      x: pointer.x, y: pointer.y,
+      vx: (pointer.dx / Math.max(dt, 1e-4)) * simW * SPLAT_FORCE,
+      vy: (pointer.dy / Math.max(dt, 1e-4)) * simH * SPLAT_FORCE,
+      color: hsv((hue + time * 0.12) % 1, 0.9, 0.85)
+               .map(c => c * Math.min(0.12 + speed * 0.35, 0.55)),
+      radius: BASE_RADIUS * parseFloat(ui.size.value),
+    };
+    pointer.dx = 0; pointer.dy = 0;
+    pointer.moved = pointer.down;   // keep dribbling dye while held still
+  }
+
+  if (!paused) {
+    // pack uniforms
+    const d = paramData;
+    d.set([1 / simW, 1 / simH, simW, simH], 0);
+    d.set([1 / dyeW, 1 / dyeH, dyeW, dyeH], 4);
+    d[8] = dt; d[9] = VEL_DISSIPATION;
+    d[10] = parseFloat(ui.fade.value);
+    d[11] = parseFloat(ui.vort.value);
+    if (splat) {
+      d.set([splat.x, splat.y, splat.vx, splat.vy], 12);
+      d.set([...splat.color, 1], 16);
+      d[20] = splat.radius; d[21] = 1;
+    } else {
+      d[21] = 0;
+    }
+    d[22] = canvas.width / canvas.height;
+    d[23] = time;
+    device.queue.writeBuffer(params, 0, d);
+
+    dispatchCount = 0;
+    const enc = device.createCommandEncoder();
+    step(enc, !!splat);
+
+    // present
+    const pass = enc.beginRenderPass({
+      colorAttachments: [{
+        view: context.getCurrentTexture().createView(),
+        loadOp: 'clear', clearValue: { r: 0.023, g: 0.023, b: 0.03, a: 1 },
+        storeOp: 'store',
+      }],
+    });
+    pass.setPipeline(pipelines.render);
+    pass.setBindGroup(0, bindGroup(`draw${dye.i}`, pipelines.render, [
+      { binding: 1, resource: sampler },
+      { binding: 2, resource: dye.r() },
+    ]));
+    pass.draw(3);
+    pass.end();
+    device.queue.submit([enc.finish()]);
+
+    ui.dispatches.textContent = dispatchCount;
+    ui.splatCount.textContent = splat ? '×2' : '×0';
+  }
+
+  requestAnimationFrame(frame);
+}
+
+// ---------- UI wiring ----------
+function bindUI() {
+  for (const id of ['fps', 'ms', 'dispatches', 'splatCount', 'vort', 'jac', 'fade', 'size']) {
+    ui[id] = document.getElementById(id);
+  }
+  const link = (input, out, fmt = (v) => v) => {
+    const o = document.getElementById(out);
+    input.addEventListener('input', () => { o.textContent = fmt(input.value); });
+  };
+  link(ui.vort, 'vortOut');
+  link(ui.fade, 'fadeOut', v => parseFloat(v).toFixed(1));
+  link(ui.size, 'sizeOut', v => parseFloat(v).toFixed(1));
+  ui.jac.addEventListener('input', () => {
+    jacobiIters = parseInt(ui.jac.value, 10);
+    document.getElementById('jacOut').textContent = jacobiIters;
+    document.getElementById('jacobiCount').textContent = '×' + jacobiIters;
+  });
+
+  document.getElementById('pauseBtn').addEventListener('click', (e) => {
+    paused = !paused;
+    e.target.textContent = paused ? 'RESUME' : 'PAUSE';
+  });
+  document.getElementById('clearBtn').addEventListener('click', () => {
+    for (const pp of [velocity, dye, pressure]) pp.t.forEach(t => t.destroy());
+    singleTexs.forEach(t => t.destroy());
+    createTextures();
+    seedSplats(0);
+  });
+}
+
+init();
+</script>
+</body>
+</html>
